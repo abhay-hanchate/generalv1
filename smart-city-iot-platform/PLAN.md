@@ -1,5 +1,15 @@
 # Case Study 6 — Smart City IoT Data Platform
 
+> **Status: implemented.** See `README.md` for setup and run order. Where the build differs from the plan below:
+> * **Ingestion:** Spark file-stream source (replayer writes JSON files atomically). Kafka is not implemented; it stays an optional extension.
+> * **Watermark / windows:** sensors report hourly, so the watermark is 2 h of *sensor time* and the windows are 6 h (a 10-min watermark would be shorter than one reading interval).
+> * **Shared clock:** the air data is shifted by whole weeks onto the traffic timeline (keeps weekday and hour), not re-stamped to wall-clock time, so event-time windows and joins stay meaningful.
+> * **Traffic model:** learns the *change* from the last hour. Raw counts trend upward, and the tree models scored worse than the naive baseline on them.
+> * **Validation window:** Feb 2017 (junction 4 only starts in Jan 2017, so it must be in the training data).
+> * **Air model:** a CO *soft sensor* (estimates the reference analyser from cheap sensors), not a next-hour forecast.
+> * **Weather API:** used to demonstrate API→JSON loading and as a live dashboard panel; it is not an ML feature.
+> * **Environment:** Windows, Python 3.11, Java 17, PySpark 3.5.3. Decisions 2 and 3 in §14 are resolved: Windows, file stream.
+
 **Syllabus mapping:** 6.1, 6.3 — Real-time pipelines, ML systems
 
 ## 1. What the project actually asks for
@@ -65,7 +75,7 @@ Dataset links:
 | End-to-end latency (sensor → dashboard) | < 10 s |
 | Micro-batch trigger | 5 s |
 | Throughput (simulated) | ≥ 1,000 events/s (replayer can speed up time) |
-| Late data tolerance | 10-min watermark |
+| Late data tolerance | 2-hour watermark in sensor time (sensors report hourly) |
 | Alert latency (pollution / congestion spike) | < 1 micro-batch |
 | Fault tolerance | Spark checkpointing → exactly-once to Parquet |
 
@@ -151,7 +161,7 @@ smart-city-iot-platform/
 
 | # | Issue found in v1 of this plan | Fix |
 |---|---|---|
-| 1 | Traffic data (2015–17, unnamed city) and UCI air data (2004–05, Italy) are from **different places and years**, so joining them on real timestamps produces nothing | Treat them as two independent sensor streams. The replayer **re-stamps both to the current time**, so they arrive together live. ML is trained per stream on its own history. We say this openly in the report as a simulation assumption |
+| 1 | Traffic data (2015–17, unnamed city) and UCI air data (2004–05, Italy) are from **different places and years**, so joining them on real timestamps produces nothing | Treat them as two independent sensor streams. The replayer shifts the air timeline by a whole number of weeks onto the traffic clock, so both arrive together and weekday/hour patterns are kept. ML is trained per stream on its own history. We say this openly in the report as a simulation assumption |
 | 2 | 48k rows is too small: cache, partitioning and broadcast tests would show ~0 s differences | Make an **×100 scaled copy** (~5M rows) by duplicating with new junction IDs plus small noise. Optimization timings run on this copy |
 | 3 | `lag()` features do not work in Structured Streaming | The replayer sends lag values inside each event (see §6) |
 | 4 | UCI file quirks: `;` separator, `,` decimals, `-200` = missing, empty trailing columns | Cleaning step: parse with `sep=';'`, replace `,`→`.`, set `-200` to null, drop empty columns, then forward-fill or drop |
@@ -167,7 +177,7 @@ smart-city-iot-platform/
 2. `notebooks/02` — transformations (filter, withColumn, Window lag, groupBy, join with a junction lookup) and actions; `explain()`; DAG screenshot.
 3. `src/scale_data.py` — ×100 dataset. `notebooks/03` — timing experiments: cache, shuffle partitions, repartition vs coalesce, broadcast join, CSV vs Parquet, AQE on/off. Each result goes in a table and a chart.
 4. `notebooks/04` — features → LR / RF / GBT → RMSE, MAE, R² → save the best `PipelineModel`.
-5. `src/replayer.py` writes JSON events (with lag fields) into `data/stream_input/` every second. `src/streaming_job.py` reads them with `readStream` and a schema, adds a watermark, computes 5-min window aggregates, scores with the saved model, flags alerts, and writes gold Parquet with checkpointing.
+5. `src/replayer.py` writes JSON events (with lag fields) into `data/stream_input/` every second. `src/streaming_job.py` reads them with `readStream` and a schema, adds a watermark, computes 6-hour window aggregates, scores with the saved model, flags alerts, and writes gold Parquet with checkpointing.
 6. `src/dashboard.py` (Streamlit) shows live vehicles vs predicted per junction, air-quality gauges, live weather from the API, and an alert table.
 7. Collect screenshots, `lastProgress` metrics (rows/sec, batch duration), the report and the PPT.
 

@@ -1,0 +1,11 @@
+# Tested with Python 3.11 + Java 17/21. PySpark 3.5 does not support Python 3.12+ on Windows reliably.
+pyspark==3.5.3
+pandas==2.2.3
+numpy==1.26.4
+pyarrow==17.0.0
+matplotlib==3.9.2
+requests>=2.31
+streamlit==1.39.0
+jupyter
+ipykernel
+pytest

@@ -147,13 +147,6 @@ smart-city-iot-platform/
 - [ ] Original code and wording, with datasets and references cited (no plagiarism)
 - [ ] Screenshots of every practical step included
 
-## 14. Decisions needed from the team
-
-1. Roll number and name for file naming.
-2. Machine OS (Windows needs `winutils.exe` for Hadoop) — or use Google Colab / Databricks Community.
-3. Kafka (more impressive) vs file-stream (simpler) for ingestion.
-4. Deadline, so the phases can be dated.
-
 ## 12. Plan verification — issues found and fixes
 
 | # | Issue found in v1 of this plan | Fix |
@@ -178,3 +171,9 @@ smart-city-iot-platform/
 6. `src/dashboard.py` (Streamlit) shows live vehicles vs predicted per junction, air-quality gauges, live weather from the API, and an alert table.
 7. Collect screenshots, `lastProgress` metrics (rows/sec, batch duration), the report and the PPT.
 
+## 14. Decisions needed from the team
+
+1. Roll number and name for file naming.
+2. Machine OS (Windows needs `winutils.exe` for Hadoop) — or use Google Colab / Databricks Community.
+3. Kafka (more impressive) vs file-stream (simpler) for ingestion.
+4. Deadline, so the phases can be dated.

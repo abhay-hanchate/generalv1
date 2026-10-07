@@ -68,3 +68,16 @@ def test_replayer_features_match_training_features(spark):
     for col in [*features.LAGS, "rolling_3h_mean"]:
         pd.testing.assert_series_equal(merged[f"{col}_batch"].astype(float), merged[f"{col}_live"].astype(float),
                                        check_names=False, rtol=1e-9)
+
+
+def test_adaptive_threshold_uses_only_past_same_hour():
+    idx = pd.date_range("2020-01-01", periods=24 * 30, freq="h")
+    s = pd.Series(10.0, index=idx)
+    s[s.index.hour == 8] = 50.0                 # 08:00 is always busy
+    s[pd.Timestamp("2020-01-29 08:00")] = 1000  # a spike must not raise its own threshold
+    thr = features.adaptive_alert_threshold(s)
+    assert pd.isna(thr[pd.Timestamp("2020-01-05 08:00")])         # < 7 days of history
+    assert thr[pd.Timestamp("2020-01-20 08:00")] == pytest.approx(50.0)
+    assert thr[pd.Timestamp("2020-01-20 09:00")] == pytest.approx(10.0)
+    assert thr[pd.Timestamp("2020-01-29 08:00")] == pytest.approx(50.0)  # excludes the hour itself
+    assert pd.Timestamp("2020-01-31 00:00") in thr.index                # one hour past the data

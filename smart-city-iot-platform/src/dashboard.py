@@ -19,6 +19,7 @@ from src import config  # noqa: E402
 JUNCTION_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100"]
 ACTUAL, PREDICTED, CRITICAL = "#2a78d6", "#eb6834", "#d03b3b"
 STREAM = config.GOLD / "stream"
+VIEWS = ["🚦 Traffic", "🌫️ Air quality", "🪟 6-h windows", "🔗 City snapshot (join)", "⚙️ Pipeline health"]
 
 st.set_page_config(page_title="Smart City IoT Platform", page_icon="🏙️", layout="wide")
 
@@ -52,21 +53,22 @@ def live_weather(lat, lon):
 
 
 def kpi_row(traffic, air, progress):
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Sensor clock", traffic["event_time"].max().strftime("%d %b %Y %H:%M") if len(traffic) else "-")
-    c2.metric("Events processed", f"{len(traffic) + len(air):,}")
+    if len(traffic):
+        st.caption(f"Sensor clock: **{traffic['event_time'].max():%d %b %Y, %H:%M}** (replayed sensor time)")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Events processed", f"{len(traffic) + len(air):,}")
     recent = traffic[traffic["event_time"] >= traffic["event_time"].max() - pd.Timedelta(hours=6)] \
         if len(traffic) else traffic
-    c3.metric("Congestion alerts (last 6 h)", int(recent["congestion_alert"].sum()) if len(recent) else 0)
+    c2.metric("Alerts, last 6 h", int(recent["congestion_alert"].sum()) if len(recent) else 0)
     lat = pd.concat([traffic.get("latency_sec", pd.Series(dtype=float)),
                      air.get("latency_sec", pd.Series(dtype=float))])
-    c4.metric("Median latency (ingest to result)", f"{lat.median():.1f} s" if len(lat) else "-",
-              help="Target from the plan: under 10 s end-to-end")
+    c3.metric("Median latency", f"{lat.median():.1f} s" if len(lat) else "-",
+              help="Sensor file written to result stored. Target from the plan: under 10 s.")
+    rate = "-"
     if len(progress):
-        p = progress[progress["query"] == "traffic_predictions"].tail(10)
-        c5.metric("Throughput (rows/s, last 10 batches)", f"{p['processed_rows_per_sec'].mean():,.0f}")
-    else:
-        c5.metric("Throughput", "-")
+        p = progress[(progress["query"] == "traffic_predictions") & (progress["input_rows"] > 0)].tail(10)
+        rate = f"{p['processed_rows_per_sec'].mean():,.0f}" if len(p) else "-"
+    c4.metric("Rows / s", rate, help="Spark processing rate, traffic query, last 10 micro-batches")
 
 
 def traffic_tab(traffic, junction, hours):
@@ -76,22 +78,23 @@ def traffic_tab(traffic, junction, hours):
     t = traffic[traffic["junction"] == junction]
     end = t["event_time"].max()
     actual = t[t["event_time"] >= end - pd.Timedelta(hours=hours)][["event_time", "vehicles"]]
-    pred = t[t["forecast_for"] >= end - pd.Timedelta(hours=hours)][["forecast_for", "predicted_vehicles",
-                                                                       "congestion_alert"]]
+    pred = t[t["forecast_for"] >= end - pd.Timedelta(hours=hours)]
+    series = ["Actual", "Predicted (next hour)", "Alert threshold"]
     long = pd.concat([
-        actual.rename(columns={"event_time": "time", "vehicles": "value"}).assign(series="Actual"),
-        pred.rename(columns={"forecast_for": "time", "predicted_vehicles": "value"})
-            .drop(columns="congestion_alert").assign(series="Predicted (next hour)"),
+        actual.rename(columns={"event_time": "time", "vehicles": "value"}).assign(series=series[0]),
+        pred[["forecast_for", "predicted_vehicles"]]
+            .rename(columns={"forecast_for": "time", "predicted_vehicles": "value"}).assign(series=series[1]),
+        pred[["forecast_for", "alert_threshold"]]
+            .rename(columns={"forecast_for": "time", "alert_threshold": "value"}).assign(series=series[2]),
     ])
     hover = alt.selection_point(fields=["time"], nearest=True, on="pointerover", empty=False)
     base = alt.Chart(long).encode(
         x=alt.X("time:T", title=None),
         y=alt.Y("value:Q", title="Vehicles per hour"),
-        color=alt.Color("series:N", scale=alt.Scale(domain=["Actual", "Predicted (next hour)"],
-                                                    range=[ACTUAL, PREDICTED]),
-                        legend=alt.Legend(orient="top", title=None)),
-        strokeDash=alt.StrokeDash("series:N", scale=alt.Scale(domain=["Actual", "Predicted (next hour)"],
-                                                              range=[[1, 0], [5, 3]]), legend=None),
+        color=alt.Color("series:N", scale=alt.Scale(domain=series, range=[ACTUAL, PREDICTED, CRITICAL]),
+                        legend=alt.Legend(orient="top", title=None, symbolType="stroke")),
+        strokeDash=alt.StrokeDash("series:N", scale=alt.Scale(domain=series, range=[[1, 0], [5, 3], [2, 2]]),
+                                  legend=None),
     )
     lines = base.mark_line(strokeWidth=2)
     points = base.mark_point(size=60, filled=True).encode(
@@ -99,11 +102,15 @@ def traffic_tab(traffic, junction, hours):
         tooltip=[alt.Tooltip("time:T", format="%d %b %H:%M"), "series:N", alt.Tooltip("value:Q", format=".1f")],
     ).add_params(hover)
     rule = alt.Chart(long).mark_rule(color="#9a9893").encode(x="time:T").transform_filter(hover)
-    limit = t["alert_threshold"].iloc[-1]
-    threshold = alt.Chart(pd.DataFrame({"y": [limit]})).mark_rule(color=CRITICAL, strokeDash=[2, 2]).encode(y="y:Q")
-    st.altair_chart((lines + points + rule + threshold).properties(height=320), use_container_width=True)
-    st.caption(f"Red dotted line = alert threshold for junction {junction} "
-               f"({limit:.0f} vehicles/h, the 90th percentile seen in training).")
+    flagged = pred[pred["congestion_alert"]]
+    marks = alt.Chart(flagged).mark_point(shape="triangle-up", size=90, filled=True, color=CRITICAL).encode(
+        x="forecast_for:T", y="predicted_vehicles:Q",
+        tooltip=[alt.Tooltip("forecast_for:T", title="alert for", format="%d %b %H:%M"),
+                 alt.Tooltip("predicted_vehicles:Q", title="predicted"),
+                 alt.Tooltip("alert_threshold:Q", title="threshold")])
+    st.altair_chart((lines + points + rule + marks).properties(height=320), use_container_width=True)
+    st.caption("Alert (▲) when the forecast exceeds the dotted red line: the 90th percentile of the same hour "
+               "of day at this junction over the previous 28 days, so 'unusually busy' adapts as traffic grows.")
 
     m = t.dropna(subset=["predicted_vehicles"]).merge(
         t[["event_time", "vehicles"]].rename(columns={"event_time": "forecast_for", "vehicles": "actual_next"}),
@@ -127,28 +134,47 @@ def air_tab(air, hours):
     if air.empty:
         st.info("Waiting for air-quality events.")
         return
-    a = air[air["event_time"] >= air["event_time"].max() - pd.Timedelta(hours=hours)]
+    a = air[air["event_time"] >= air["event_time"].max() - pd.Timedelta(hours=hours)].sort_values("event_time")
+    ref = a[["event_time", "co_gt"]].dropna().rename(columns={"co_gt": "value"})
+    # break the reference line where the analyser was offline instead of bridging the gap
+    ref["segment"] = (ref["event_time"].diff() > pd.Timedelta(hours=1)).cumsum()
+    names = ["Reference analyser", "Soft sensor, drift-corrected", "Soft sensor, raw"]
     long = pd.concat([
-        a[["event_time", "co_gt"]].rename(columns={"co_gt": "value"}).assign(series="Reference analyser"),
-        a[["event_time", "estimated_co"]].rename(columns={"estimated_co": "value"}).assign(series="Soft-sensor estimate"),
-    ]).dropna()
+        ref.assign(series=names[0]),
+        a[["event_time", "calibrated_co"]].rename(columns={"calibrated_co": "value"}).assign(segment=-1, series=names[1]),
+        a[["event_time", "estimated_co"]].rename(columns={"estimated_co": "value"}).assign(segment=-2, series=names[2]),
+    ])
     chart = alt.Chart(long).mark_line(strokeWidth=2).encode(
         x=alt.X("event_time:T", title=None),
         y=alt.Y("value:Q", title="CO (mg/m³)"),
-        color=alt.Color("series:N", scale=alt.Scale(range=[ACTUAL, PREDICTED]),
-                        legend=alt.Legend(orient="top", title=None)),
+        color=alt.Color("series:N", scale=alt.Scale(domain=names, range=[ACTUAL, PREDICTED, "#a3a29b"]),
+                        legend=alt.Legend(orient="top", title=None, symbolType="stroke")),
+        strokeDash=alt.StrokeDash("series:N", scale=alt.Scale(domain=names, range=[[1, 0], [1, 0], [4, 3]]),
+                                  legend=None),
+        detail="segment:N",
         tooltip=[alt.Tooltip("event_time:T", format="%d %b %H:%M"), "series:N", alt.Tooltip("value:Q", format=".2f")],
     ).properties(height=300)
     st.altair_chart(chart, use_container_width=True)
+    both = air.dropna(subset=["co_gt"])
+    if len(both):
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Analyser offline", f"{air['co_gt'].isna().mean() * 100:.0f} % of hours",
+                  help="The soft sensor still gives a value for these hours")
+        c2.metric("MAE raw", f"{(both['estimated_co'] - both['co_gt']).abs().mean():.2f} mg/m³")
+        c3.metric("MAE drift-corrected", f"{(both['calibrated_co'] - both['co_gt']).abs().mean():.2f} mg/m³")
+        c4.metric("Calibration factor", f"× {air.sort_values('event_time')['calibration_factor'].iloc[-1]:.2f}",
+                  help="Sum of true CO / sum of estimated CO over the last 24 readings with a reference value. The cheap "
+                       "sensors drift as they age; this recalibrates the model online (× 1.00 = no drift).")
     thr = json.loads(config.THRESHOLDS_JSON.read_text())["air_co_mg_m3"]
     st.caption(f"The soft sensor estimates CO from cheap sensors, including hours when the expensive "
-               f"reference analyser is offline (gaps in the blue line). Alert above {thr:.1f} mg/m³.")
+               f"reference analyser is offline (gaps in the blue line). Alerts use the drift-corrected value "
+               f"(above {thr:.1f} mg/m³).")
     alerts = air[air["co_alert"]].sort_values("event_time", ascending=False).head(10)
     st.subheader("⚠ High-CO alerts (latest 10)")
     if alerts.empty:
         st.write("No alerts yet.")
     else:
-        st.dataframe(alerts[["event_time", "estimated_co", "co_gt", "temperature"]], hide_index=True,
+        st.dataframe(alerts[["event_time", "calibrated_co", "estimated_co", "co_gt", "temperature"]], hide_index=True,
                      use_container_width=True)
 
 
@@ -234,16 +260,17 @@ def live():
     log = config.STREAM_METRICS / "progress.jsonl"
     progress = pd.read_json(log, lines=True) if log.exists() and log.stat().st_size else pd.DataFrame()
     kpi_row(traffic, air, progress)
-    tabs = st.tabs(["🚦 Traffic", "🌫️ Air quality", "🪟 6-h windows", "🔗 City snapshot (join)", "⚙️ Pipeline health"])
-    with tabs[0]:
+    # only the selected view is drawn (charts inside hidden tabs get sized wrongly)
+    view = st.radio("View", list(VIEWS), horizontal=True, label_visibility="collapsed", key="view")
+    if view == "🚦 Traffic":
         traffic_tab(traffic, junction, hours)
-    with tabs[1]:
+    elif view == "🌫️ Air quality":
         air_tab(air, hours)
-    with tabs[2]:
+    elif view == "🪟 6-h windows":
         windows_tab(windows)
-    with tabs[3]:
+    elif view == "🔗 City snapshot (join)":
         snapshot_tab(snapshot)
-    with tabs[4]:
+    else:
         health_tab(traffic, progress)
 
 

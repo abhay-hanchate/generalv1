@@ -134,8 +134,10 @@ def train_traffic(spark):
         str(r["junction"]): evaluate(test_pred.filter(F.col("junction") == r["junction"]), label)
         for r in test_pred.select("junction").distinct().orderBy("junction").collect()
     }
+    # fallback threshold (used until 7 days of history exist): p90 of the most recent 8 weeks
+    recent = train.unionByName(val).filter(F.col("event_time") >= F.date_sub(F.lit(config.TRAFFIC_TEST_START), 56))
     thresholds = {str(r["junction"]): float(r["p"]) for r in
-                  train.unionByName(val).groupBy("junction")
+                  recent.groupBy("junction")
                   .agg(F.percentile_approx("vehicles", config.ALERT_PERCENTILE).alias("p")).collect()}
 
     pdf = test_pred.select("event_time", "junction", "vehicles", "prediction").toPandas()

@@ -60,10 +60,13 @@ def e1_caching(spark, results):
         df = spark.read.parquet(config.p(SCALED_PARQUET))
         return features.add_time_features(features.add_traffic_lags(df))
 
+    # Every query uses all window features (as model training does). If a query used only one
+    # feature, Spark's optimizer would skip the other windows and the comparison would be unfair.
+    lag_cols = [*features.LAGS, "rolling_3h_mean"]
     queries = [
-        lambda d: d.groupBy("junction").agg(F.avg("vehicles"), F.avg("prev_hour_vehicles")),
-        lambda d: d.groupBy("hour", "is_weekend").agg(F.avg("vehicles"), F.max("vehicles")),
-        lambda d: d.filter(F.col("vehicles") > F.col("same_hour_last_week") * 1.5).groupBy("year").count(),
+        lambda d: d.groupBy("junction").agg(*[F.avg(c) for c in lag_cols]),
+        lambda d: d.groupBy("hour", "is_weekend").agg(*[F.stddev(c) for c in lag_cols]),
+        lambda d: d.filter(F.col("vehicles") > F.greatest(*lag_cols) * 1.2).groupBy("year").count(),
     ]
 
     def no_cache():
@@ -136,7 +139,11 @@ def e4_formats(spark, results):
 
 
 def e5_repartition_coalesce(spark, results):
+    # small input splits -> ~30 input partitions, so both methods can reach 8 output files
+    # (coalesce can only reduce the partition count, never increase it)
+    set_conf(spark, **{"spark.sql.files.maxPartitionBytes": 1024 * 1024})
     df = spark.read.parquet(config.p(SCALED_PARQUET)).filter(F.col("vehicles") > 20)
+    print(f"  E5 input partitions: {df.rdd.getNumPartitions()}")
     out = config.PERF_DATA / "write_test"
     balance = {}
 
@@ -150,6 +157,7 @@ def e5_repartition_coalesce(spark, results):
     record(results, "E5 repartition/coalesce", "repartition(8) - full shuffle", lambda: write("repartition"))
     record(results, "E5 repartition/coalesce", "coalesce(8) - no shuffle", lambda: write("coalesce"))
     results[-2]["note"], results[-1]["note"] = balance["repartition"], balance["coalesce"]
+    spark.conf.unset("spark.sql.files.maxPartitionBytes")
 
 
 def e6_aqe(spark, results):

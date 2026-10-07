@@ -60,6 +60,15 @@ def to_vehicle_forecast(scored: DataFrame) -> DataFrame:
                              F.greatest(F.lit(0.0), F.col("prev_hour_vehicles") + F.col("prediction")))
 
 
+def adaptive_alert_threshold(s: pd.Series, days=28, q=0.90, min_days=7) -> pd.Series:
+    """'Unusually busy' level for each hour: the q-quantile of the same hour-of-day over the previous
+    `days` days (the hour itself excluded). Adapts as traffic grows, unlike one fixed number.
+    Returned on an hourly index that extends one hour past the data, so the next hour has a value."""
+    full = s.reindex(pd.date_range(s.index.min(), s.index.max() + pd.Timedelta(hours=1), freq="h"))
+    by_hour = full.groupby(full.index.hour, group_keys=False)
+    return by_hour.apply(lambda g: g.shift(1).rolling(f"{days}D", min_periods=min_days).quantile(q)).sort_index()
+
+
 def traffic_context_pandas(traffic: pd.DataFrame) -> pd.DataFrame:
     """pandas version used by the replayer (the 'edge gateway' that knows recent history).
 
@@ -81,5 +90,6 @@ def traffic_context_pandas(traffic: pd.DataFrame) -> pd.DataFrame:
             frame[name] = s.reindex(target - pd.Timedelta(hours=hours)).values
         # mean of the 3 hours before T: (T-3h, T-2h, T-1h) = (t-2h, t-1h, t)
         frame["rolling_3h_mean"] = s.rolling("3h").mean().reindex(s.index).values
+        frame["alert_threshold"] = adaptive_alert_threshold(s).reindex(target).values
         out.append(frame)
     return pd.concat(out, ignore_index=True)
